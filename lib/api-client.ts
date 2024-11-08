@@ -1,4 +1,4 @@
-import { getAuthToken, setAuthToken, clearAuthToken } from '@/lib/auth';
+import { getAuthToken, setAuthToken, clearAuthToken, isTokenExpired } from '@/lib/auth';
 
 const API_BASE = "https://962450b2-0b01-4d98-81a6-eb2f6bd25c58-00-2tbe9rimsz2tw.sisko.replit.dev";
 
@@ -34,6 +34,8 @@ export interface ChatMessage {
 }
 
 class ApiClient {
+  private refreshPromise: Promise<boolean> | null = null;
+
   private async getHeaders(): Promise<Headers> {
     const headers = new Headers();
     const token = getAuthToken();
@@ -96,32 +98,56 @@ class ApiClient {
   }
 
   async refreshToken(): Promise<boolean> {
+    // If there's already a refresh in progress, return that promise
+    if (this.refreshPromise) {
+      return this.refreshPromise;
+    }
+
     try {
       console.log("Attempting token refresh");
-      const headers = await this.getHeaders();
-      const response = await fetch(`${API_BASE}/api/auth/refresh`, {
-        method: 'POST',
-        headers,
-        credentials: 'include',
-      });
+      
+      // Create new refresh promise
+      this.refreshPromise = (async () => {
+        const headers = await this.getHeaders();
+        const response = await fetch(`${API_BASE}/api/auth/refresh`, {
+          method: 'POST',
+          headers,
+          credentials: 'include',
+        });
 
-      const data = await this.handleResponse<TokenResponse>(response);
-      
-      if (data.status === 'success' && data.data?.access_token) {
-        console.log("Token refresh successful");
-        setAuthToken(data.data.access_token);
-        return true;
-      }
-      
-      return false;
+        const data = await this.handleResponse<TokenResponse>(response);
+        
+        if (data.status === 'success' && data.data?.access_token) {
+          console.log("Token refresh successful");
+          setAuthToken(data.data.access_token);
+          return true;
+        }
+        
+        return false;
+      })();
+
+      return await this.refreshPromise;
     } catch (error) {
       console.error("Token refresh error:", error);
       clearAuthToken();
       return false;
+    } finally {
+      this.refreshPromise = null;
     }
   }
 
   private async fetchWithAuth<T>(url: string, options: RequestInit = {}): Promise<T> {
+    const token = getAuthToken();
+    
+    // Check if token needs refresh before making request
+    if (token && isTokenExpired(token)) {
+      console.log("Token expired or expiring soon, refreshing...");
+      const refreshed = await this.refreshToken();
+      if (!refreshed) {
+        throw new Error('Authentication failed');
+      }
+    }
+    
     const headers = await this.getHeaders();
     
     try {

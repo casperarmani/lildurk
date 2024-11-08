@@ -4,7 +4,7 @@ import { createContext, useContext, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { User } from "@supabase/supabase-js";
 import { apiClient } from "@/lib/api-client";
-import { getAuthToken, clearAuthToken } from "@/lib/auth";
+import { getAuthToken, clearAuthToken, isTokenExpired, decodeToken } from "@/lib/auth";
 
 type AuthContextType = {
   user: User | null;
@@ -34,30 +34,37 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   useEffect(() => {
+    let refreshInterval: NodeJS.Timeout;
+
     const initAuth = async () => {
       const token = getAuthToken();
       console.log("Initializing auth, token exists:", !!token);
       
       if (token) {
         try {
-          console.log("Refreshing token...");
-          const response = await apiClient.refreshToken();
-          console.log("Token refresh response:", response);
-          
-          if (response) {
-            // Set the user from the token response
-            const tokenData = JSON.parse(atob(token.split('.')[1]));
+          // Check if token needs immediate refresh
+          if (isTokenExpired(token)) {
+            console.log("Token expired or expiring soon, refreshing...");
+            const refreshed = await apiClient.refreshToken();
+            if (!refreshed) {
+              console.log("Initial token refresh failed, logging out");
+              logout();
+              setLoading(false);
+              return;
+            }
+          }
+
+          // Set the user from the token
+          const decoded = decodeToken(token);
+          if (decoded) {
             setUser({
-              id: tokenData.sub,
-              email: tokenData.email,
-              user_metadata: tokenData.user_metadata || {},
-              app_metadata: tokenData.app_metadata || {},
-              aud: tokenData.aud,
-              role: tokenData.role,
+              id: decoded.sub,
+              email: decoded.email,
+              user_metadata: decoded.user_metadata || {},
+              app_metadata: decoded.app_metadata || {},
+              aud: decoded.aud,
+              role: decoded.role,
             } as User);
-          } else {
-            console.log("Token refresh failed, logging out");
-            logout();
           }
         } catch (error) {
           console.error("Auth initialization error:", error);
@@ -68,26 +75,39 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setLoading(false);
     };
 
-    initAuth();
+    const setupRefreshInterval = () => {
+      // Clear any existing interval
+      if (refreshInterval) {
+        clearInterval(refreshInterval);
+      }
 
-    // Check token expiration periodically
-    const interval = setInterval(async () => {
-      const currentToken = getAuthToken();
-      if (currentToken) {
-        try {
-          const success = await apiClient.refreshToken();
-          if (!success) {
-            console.log("Token refresh failed during interval check");
+      // Set up new refresh interval
+      refreshInterval = setInterval(async () => {
+        const token = getAuthToken();
+        if (token && isTokenExpired(token)) {
+          console.log("Token refresh needed during interval check");
+          try {
+            const success = await apiClient.refreshToken();
+            if (!success) {
+              console.log("Token refresh failed during interval check");
+              logout();
+            }
+          } catch (error) {
+            console.error("Token refresh interval error:", error);
             logout();
           }
-        } catch (error) {
-          console.error("Token refresh interval error:", error);
-          logout();
         }
-      }
-    }, 5 * 60 * 1000); // Every 5 minutes
+      }, 60 * 1000); // Check every minute
+    };
 
-    return () => clearInterval(interval);
+    initAuth();
+    setupRefreshInterval();
+
+    return () => {
+      if (refreshInterval) {
+        clearInterval(refreshInterval);
+      }
+    };
   }, []);
 
   return (
